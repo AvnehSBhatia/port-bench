@@ -4,7 +4,7 @@
 //   OPENROUTER_API_KEY=... node run.mjs --smoke             # 3 min / 5 cents per harness per task: can each drive each model?
 //   OPENROUTER_API_KEY=... node run.mjs --task tomli        # one task, both harnesses
 //   OPENROUTER_API_KEY=... node run.mjs --all               # every task
-//   options: --arms codex,heliod   --allow-any-heliod
+//   options: --arms codex,heliod   --allow-any-heliod   --suite <dir> (a folder with its own tasks.json, prepare.py, grade.py)
 //
 // Harnesses run one after the other, never at the same time, so their requests never overlap at OpenRouter or the
 // provider. The order alternates by task (codex first on the 1st and 3rd task, heliod first on the 2nd) so neither
@@ -14,11 +14,12 @@
 // bills. When a harness stops, grade.py builds and tests its port. Results: results/<time>/results.json, SCORECARD.md.
 import { spawn, spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 const HERE = import.meta.dirname;
 const args = Object.fromEntries(process.argv.slice(2).reduce((acc, a, i, all) => (a.startsWith("--") ? [...acc, [a.slice(2), all[i + 1] && !all[i + 1].startsWith("--") ? all[i + 1] : "1"]] : acc), []));
-const TASKS = JSON.parse(readFileSync(join(HERE, "tasks.json"), "utf8"));
+const SUITE = args.suite ? resolve(args.suite) : HERE;
+const TASKS = JSON.parse(readFileSync(join(SUITE, "tasks.json"), "utf8"));
 const MODELS = JSON.parse(readFileSync(join(HERE, "models.json"), "utf8"));
 const CODEX = process.env.CODEX_BIN ?? join(process.env.HOME, ".local/bin/codex");
 const HELIOD = process.env.HELIOD_MAIN ?? join(process.env.HOME, ".heliod/lib/node_modules/heliod-harness/dist/main.js");
@@ -97,7 +98,7 @@ function runArm(name, t, budget, maxMs) {
 	const dir = join(OUT, t.id, name);
 	mkdirSync(dir, { recursive: true });
 	const ws = join(dir, "ws");
-	const prep = spawnSync("python3", [join(HERE, "prepare.py"), t.id, ws], { encoding: "utf8" });
+	const prep = spawnSync("python3", [join(SUITE, "prepare.py"), t.id, ws], { encoding: "utf8" });
 	if (prep.status !== 0) throw new Error(`prepare ${t.id}: ${prep.stderr}`);
 	const key = `${name}-${t.id}`;
 	const a = arm(name, t.model, ws, dir, key);
@@ -155,7 +156,7 @@ async function runTask(t, { smoke }) {
 			const m = (await spend())[d.key] ?? {};
 			let grade = null;
 			if (!smoke) {
-				const g = spawnSync("python3", [join(HERE, "grade.py"), t.id, d.ws], { encoding: "utf8", maxBuffer: 1 << 26 });
+				const g = spawnSync("python3", [join(SUITE, "grade.py"), t.id, d.ws], { encoding: "utf8", maxBuffer: 1 << 26 });
 				try {
 					grade = JSON.parse(g.stdout.trim().split("\n").pop());
 				} catch {
@@ -183,6 +184,7 @@ async function runTask(t, { smoke }) {
 				cache_hit: m.input ? Number((m.cached / m.input).toFixed(3)) : 0,
 				refused_calls: m.refused ?? 0,
 				stopped_by: d.why,
+				...(grade?.detail?.blocks ? { blocks: grade.detail.blocks } : {}),
 			};
 			rows.push(row);
 			console.log(`  ${row.arm}: works ${row.works}, tests ${row.tests}, ${row.minutes} min, $${row.billed_usd}, cache ${row.cache_hit}, stopped by ${row.stopped_by}`);
@@ -227,5 +229,14 @@ const md = [
 	"| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
 	...rows.map((r) => `| ${r.task} | ${r.model} | ${r.arm} | ${r.works === null ? "-" : r.works ? "yes" : "no"} | ${r.tests ?? "-"} | ${r.minutes} | ${r.billed_usd} | ${(r.input_tokens / 1e6).toFixed(2)}M / ${(r.cached_tokens / 1e6).toFixed(2)}M / ${(r.output_tokens / 1e3).toFixed(0)}k | ${r.stopped_by} |`),
 ].join("\n");
-writeFileSync(join(OUT, "SCORECARD.md"), `${md}\n\n${VERSIONS.codex}; Heliod Harness ${VERSIONS.heliod}; reasoning ${EFFORT}.\n`);
+const blockRows = rows.filter((r) => r.blocks);
+const blocks = blockRows.length
+	? [
+			"",
+			`| Task | Harness | ${Object.keys(blockRows[0].blocks).map((k) => `${k} done / rules kept`).join(" | ")} |`,
+			`| --- | --- | ${Object.keys(blockRows[0].blocks).map(() => "---").join(" | ")} |`,
+			...blockRows.map((r) => `| ${r.task} | ${r.arm} | ${Object.values(r.blocks).map((b) => `${b.done}/10, ${Math.round(b.rules_kept * 100)}%`).join(" | ")} |`),
+		].join("\n")
+	: "";
+writeFileSync(join(OUT, "SCORECARD.md"), `${md}\n${blocks}\n\n${VERSIONS.codex}; Heliod Harness ${VERSIONS.heliod}; reasoning ${EFFORT}.\n`);
 console.log(`\n${md}\nresults: ${OUT}`);
