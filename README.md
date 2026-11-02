@@ -14,11 +14,11 @@ compiled build. Each attempt reports:
 
 ## Tasks
 
-| Library | What it is | Python | Graded by | Model | Cap |
+| Library | What it is | Python | Graded by | Model | Cap per harness |
 | --- | --- | --- | --- | --- | --- |
-| [tomli](https://github.com/hukkin/tomli) | The TOML parser that became Python's `tomllib` | ~1.1k lines | Its tests, including 744 toml-test cases | Claude Haiku 5.5 | $5, 2 h |
-| [jmespath.py](https://github.com/jmespath/jmespath.py) | JMESPath, the JSON query language in the AWS CLI | ~1.9k lines | The official JMESPath compliance suite | GPT-6 Luna | $5, 2 h |
-| [python-tabulate](https://github.com/astanin/python-tabulate) | Pretty-printed tables | ~3.1k lines | Its public-API tests | DeepSeek V4 Flash | $5, 2 h |
+| [tomli](https://github.com/hukkin/tomli) | The TOML parser that became Python's `tomllib` | ~1.1k lines | Its tests, including 744 toml-test cases | Claude Haiku 5.5 | $2.50, 2 h |
+| [jmespath.py](https://github.com/jmespath/jmespath.py) | JMESPath, the JSON query language in the AWS CLI | ~1.9k lines | The official JMESPath compliance suite | GPT-6 Luna | $2.50, 2 h |
+| [python-tabulate](https://github.com/astanin/python-tabulate) | Pretty-printed tables | ~3.1k lines | Its public-API tests | DeepSeek V4.1 Flash | $2.50, 2 h |
 
 Commits are pinned in `tasks.json`. Each task runs on a different model, so one run covers three model families.
 

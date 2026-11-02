@@ -55,7 +55,7 @@ async function preflight(model) {
 		const r = await fetch(`${base}/${path}`, { method: "POST", headers, body: JSON.stringify(body) });
 		const j = await r.json().catch(() => ({}));
 		if (!r.ok || j.error) problems.push(`${path}: HTTP ${r.status} ${JSON.stringify(j.error ?? j).slice(0, 200)}`);
-		else if (j.provider && !j.provider.toLowerCase().startsWith(MODELS[model].provider)) problems.push(`${path}: served by ${j.provider}, expected ${MODELS[model].provider}`);
+		else if (j.provider && j.provider.toLowerCase() !== MODELS[model].provider.split("/")[0]) problems.push(`${path}: served by ${j.provider}, expected ${MODELS[model].provider}`);
 	}
 	return problems;
 }
