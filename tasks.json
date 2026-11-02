@@ -1,0 +1,118 @@
+[
+  {
+    "id": "tomli",
+    "what": "a TOML parser (the library Python's standard tomllib came from)",
+    "repo": "https://github.com/hukkin/tomli",
+    "commit": "43a86ade8b795c6ef9b4ec53372a607cd1ed426f",
+    "package": "tomli",
+    "implementation": [
+      "src/tomli"
+    ],
+    "packaging": [
+      "pyproject.toml",
+      "setup.py"
+    ],
+    "test_files": [
+      "tests"
+    ],
+    "graded": [
+      "tests/test_data.py",
+      "tests/test_error.py",
+      "tests/test_misc.py"
+    ],
+    "test_deps": [],
+    "forbidden_crates": [
+      "toml",
+      "toml_edit",
+      "toml-edit",
+      "basic-toml",
+      "toml-parser",
+      "taplo",
+      "tomling",
+      "toml-span",
+      "serde_toml"
+    ],
+    "forbidden_python": [
+      "tomllib"
+    ],
+    "model": "anthropic/claude-haiku-5.5",
+    "budget_usd": 5,
+    "max_minutes": 120
+  },
+  {
+    "id": "jmespath",
+    "what": "JMESPath, the JSON query language used by the AWS CLI and boto3",
+    "repo": "https://github.com/jmespath/jmespath.py",
+    "commit": "2812594e69d43098ef60f81f4efc404c071b0418",
+    "package": "jmespath",
+    "implementation": [
+      "jmespath"
+    ],
+    "packaging": [
+      "setup.py",
+      "setup.cfg",
+      "requirements.txt",
+      "tox.ini"
+    ],
+    "test_files": [
+      "tests"
+    ],
+    "graded": [
+      "tests/test_compliance.py"
+    ],
+    "test_deps": [],
+    "forbidden_crates": [
+      "jmespath",
+      "jmespatch",
+      "jmespath-rs",
+      "jmespath_community",
+      "jaq-core",
+      "jsonpath-rust",
+      "jsonpath_lib"
+    ],
+    "forbidden_python": [],
+    "model": "openai/gpt-6-luna",
+    "budget_usd": 5,
+    "max_minutes": 120
+  },
+  {
+    "id": "tabulate",
+    "what": "python-tabulate, the standard library for printing tables",
+    "repo": "https://github.com/astanin/python-tabulate",
+    "commit": "268615a5c27dc40e5c22454c07b44d5c50410da0",
+    "package": "tabulate",
+    "implementation": [
+      "tabulate"
+    ],
+    "packaging": [
+      "pyproject.toml",
+      "tox.ini"
+    ],
+    "test_files": [
+      "test"
+    ],
+    "graded": [
+      "test/test_output.py",
+      "test/test_input.py",
+      "test/test_regression.py",
+      "test/test_api.py"
+    ],
+    "test_deps": [],
+    "forbidden_crates": [
+      "tabled",
+      "comfy-table",
+      "comfy_table",
+      "prettytable-rs",
+      "prettytable",
+      "cli-table",
+      "term-table",
+      "tabular",
+      "ascii_table",
+      "text-tables"
+    ],
+    "forbidden_python": [],
+    "model": "deepseek/deepseek-v4-flash",
+    "budget_usd": 5,
+    "max_minutes": 120
+  }
+]
