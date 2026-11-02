@@ -7,7 +7,8 @@
 //     same provider (and its prompt cache) at the same price; a model missing from models.json is refused (HTTP 400);
 //   - asks for usage on streamed chat completions (the Responses API always sends it);
 //   - adds up the cost OpenRouter reports for each response (usage.cost: what OpenRouter bills);
-//   - refuses new requests from an arm once its billed cost reaches the budget (HTTP 402).
+//   - refuses new requests from an arm once its billed cost reaches the budget (HTTP 402);
+//   - logs OpenRouter's generation id, so audit.mjs can confirm every request's cost and provider with OpenRouter.
 // One JSON line per request goes to <OUT>/proxy.jsonl. GET /spend returns the totals per arm.
 import http from "node:http";
 import https from "node:https";
@@ -25,6 +26,25 @@ const log = (o) => appendFileSync(LOG, JSON.stringify({ t: Date.now(), ...o }) +
 /** arm -> { usd, calls, input, cached, cacheWrite, output, refused, inflight, models } */
 const spend = {};
 const arm = (a) => (spend[a] ??= { usd: 0, calls: 0, input: 0, cached: 0, cacheWrite: 0, output: 0, refused: 0, inflight: 0, models: {} });
+
+/** OpenRouter's generation id: the top-level id on chat completions, response.id on the Responses API. */
+function generationOf(text, sse) {
+	let id = null;
+	const visit = (o) => {
+		if (id || !o || typeof o !== "object") return;
+		// Whatever id the response carries; audit.mjs reports any OpenRouter cannot look up as unconfirmed.
+		if (typeof o.response?.id === "string") id = o.response.id;
+		else if (typeof o.id === "string" && !o.type) id = o.id;
+	};
+	for (const d of sse ? text.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()) : [text]) {
+		if (!d || d === "[DONE]") continue;
+		try {
+			visit(JSON.parse(d));
+		} catch {}
+		if (id) break;
+	}
+	return id;
+}
 
 function usageOf(text, sse) {
 	let usage = null;
@@ -131,7 +151,7 @@ const server = http.createServer((req, res) => {
 				s.inflight--;
 				const text = Buffer.concat(got).toString("utf8");
 				const u = usageOf(text, sse);
-				const rec = { arm: a, path: "/" + rest, status: ur.statusCode, ms: Date.now() - t0, model, cacheHints };
+				const rec = { arm: a, path: "/" + rest, status: ur.statusCode, ms: Date.now() - t0, model, gen: generationOf(text, sse), cacheHints };
 				if (u) {
 					const cost = u.cost ?? priceOf(model, u);
 					s.usd += cost;

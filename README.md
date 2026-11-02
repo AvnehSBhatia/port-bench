@@ -11,6 +11,8 @@ compiled build. Each attempt reports:
 - **Time:** minutes from start until the agent stopped.
 - **Cost:** what OpenRouter billed, in dollars.
 - **Tokens:** input, cached and output tokens, and the number of model calls.
+- **Per passing test:** dollars and tokens divided by the tests the port passes, so a harness cannot look cheap by
+  stopping early.
 
 ## Tasks
 
@@ -30,8 +32,17 @@ Every harness gets:
 - the same model, routed through OpenRouter to one pinned provider with no fallbacks;
 - medium reasoning, the same caps, and permission to run any command.
 
-Harnesses run one at a time, never at once, and the order alternates between tasks. Cost is what OpenRouter
-billed, metered per request by `proxy.mjs`.
+Harnesses run one at a time, never at once. Each task runs several trials (`--trials`, 3 for published numbers),
+and which harness goes first rotates with the task and the trial. Cost is what OpenRouter billed, metered per
+request by `proxy.mjs`. Codex runs with subagents on; `--arms codex,codex-solo,heliod` adds Codex without them.
+
+## Checked billing
+
+After a run, `audit.mjs` looks up every metered request at OpenRouter by its generation id and checks:
+- what OpenRouter billed, against what the proxy metered;
+- which provider served it, against the pin in `models.json`.
+
+It writes `AUDIT.md`. Anyone with the run's `proxy.jsonl` and access to the same OpenRouter account can repeat it.
 
 ## No cheating
 
@@ -46,16 +57,20 @@ A port does not count if:
 - its wheel ships anything beyond the package (R2);
 - its Python files hold more than imports and constants (R3);
 - its Rust code runs Python source (R4);
-- it embeds the original Python (R5).
+- it embeds the original Python (R5);
+- it stores the tests' answers: 5 or more of the test suite's long strings (expected outputs, inputs, data files)
+  that the original library does not itself contain (R6).
 
 ## Validation
 
-- `python3 selftest.py` (seconds): 41 checks that every rule catches what it should and passes honest code.
+- `python3 selftest.py` (seconds): 46 checks that every rule catches what it should and passes honest code.
+- `node report.mjs --selftest` (instant): the report's arithmetic on made-up results.
 - `python3 validate.py` (minutes): for every task:
   - the original Python library passes the full suite, which pins the expected count;
   - an empty attempt fails;
   - a wheel that ships the original Python passes the tests and is rejected by the rules;
-  - embedded Python, re-exporting `tomllib`, a smuggled pytest plugin and a forbidden crate are each caught.
+  - embedded Python, re-exporting `tomllib`, a smuggled pytest plugin, stored test answers and a forbidden crate
+    are each caught.
 
   It writes `VALIDATION.md`.
 
@@ -69,13 +84,23 @@ export OPENROUTER_API_KEY=...
 python3 validate.py           # once: check the benchmark itself
 node run.mjs --preflight      # one tiny request per model: routing and keys work
 node run.mjs --smoke          # 3 minutes per harness per task: each harness can drive each model
-node run.mjs --all            # the benchmark
+node run.mjs --all --trials 3 # the benchmark
 ```
 
 Results go to `results/<time>/`:
-- `SCORECARD.md`;
-- `results.json`;
-- for each harness, the full transcript, the final workspace and `grade.json`, so anyone can check a result by hand.
+- `REPORT.md`: medians over trials, the cost and tokens per passing test, and each harness's ratio to Heliod;
+- `AUDIT.md`: the billing check;
+- `SCORECARD.md`: one row per attempt;
+- `results.json`, with a manifest: tool versions, this repository's commit, and hashes of the files that define
+  the benchmark;
+- for each attempt, the full transcript, the final workspace and `grade.json`, so anyone can check a result by hand.
+
+## Limits
+
+- These libraries are well known, so models have seen their Python source. Both harnesses get the same model, so
+  this does not favour either, but it does make the tasks easier than porting unknown code.
+- Three libraries is a small sample. The report states the sample size next to every number.
+- One prompt and medium reasoning for every harness. Other settings may change the results.
 
 ## License
 

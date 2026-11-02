@@ -24,7 +24,10 @@ Rules:
  R4 the Rust source does not run Python source (PyO3 run/eval/from_code, CPython's PyRun_*, builtins
     exec/eval/compile) and does not reach into pytest or unittest;
  R5 no file in the wheel embeds Python source: no Python function definitions, and fewer than 10 lines of the
-    original implementation verbatim.
+    original implementation verbatim;
+ R6 no file in the wheel memorizes the tests: fewer than 5 of the test suite's long strings (40+ characters: expected
+    outputs, inputs, data files) that the original implementation does not itself contain. A port computes answers;
+    it does not store them.
 """
 
 import ast
@@ -43,6 +46,10 @@ import zipfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 GRADER_DEPS = ["maturin==1.16.0", "pytest==9.2.0"]
 REFERENCE_LINES_LIMIT = 10
+ANSWER_MIN_CHARS = 40
+ANSWER_LIMIT = 5
+ANSWER_MAX_STRINGS = 6000
+DATA_EXTS = (".json", ".toml", ".txt", ".yaml", ".yml", ".csv", ".out", ".expected")
 
 
 def task(task_id):
@@ -144,13 +151,67 @@ def reference_lines(ref_dir):
     return out
 
 
+def test_answers(tests_dir, ref_dir):
+    """R6: the test suite's strings of 40+ characters that the original implementation does not contain.
+
+    String constants in the test files, string values in JSON data files, and the text (whole file and long lines) of
+    other data files. Strings the implementation itself holds (messages, docstrings) are left out: a port may carry
+    those. What is left are answers and inputs only the tests know.
+    """
+    ref_text = ""
+    for path in glob.glob(os.path.join(ref_dir, "**", "*.py"), recursive=True):
+        ref_text += open(path, encoding="utf-8", errors="replace").read()
+    found = set()
+
+    def add(s):
+        if isinstance(s, str) and len(s.strip()) >= ANSWER_MIN_CHARS:
+            found.add(s)
+
+    def walk_json(o):
+        if isinstance(o, str):
+            add(o)
+        elif isinstance(o, list):
+            for x in o:
+                walk_json(x)
+        elif isinstance(o, dict):
+            for k, v in o.items():
+                add(k)
+                walk_json(v)
+
+    for path in sorted(glob.glob(os.path.join(tests_dir, "**", "*"), recursive=True)):
+        if not os.path.isfile(path) or os.path.getsize(path) > 2_000_000:
+            continue
+        text = open(path, encoding="utf-8", errors="replace").read()
+        if path.endswith(".py"):
+            try:
+                tree = ast.parse(text)
+            except SyntaxError:
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Constant):
+                    add(node.value)
+        elif path.endswith(".json"):
+            try:
+                walk_json(json.loads(text))
+            except ValueError:
+                pass
+        elif path.endswith(DATA_EXTS):
+            if len(text) <= 4000:
+                add(text)
+            for line in text.splitlines():
+                add(line)
+    answers = sorted((s for s in found if s not in ref_text), key=len, reverse=True)[:ANSWER_MAX_STRINGS]
+    return {s.encode("utf-8") for s in answers}
+
+
 DEF_LINE = re.compile(rb"(?m)^[ \t]*(async[ \t]+)?def [A-Za-z_][A-Za-z0-9_]*\([^\n]*\)[^\n]*:[ \t]*$")
 
 
-def check_wheel(wheel, pkg, ref_lines):
-    """R2, R3 and R5 on the wheel's contents. Returns (problems, has_extension)."""
+def check_wheel(wheel, pkg, ref_lines, answers=frozenset()):
+    """R2, R3, R5 and R6 on the wheel's contents. Returns (problems, has_extension)."""
     bad = []
     has_ext = False
+    memorized = set()
     with zipfile.ZipFile(wheel) as z:
         for name in z.namelist():
             top = name.split("/")[0]
@@ -167,6 +228,7 @@ def check_wheel(wheel, pkg, ref_lines):
             elif not (name.startswith(pkg + "/") or name.startswith(pkg + ".libs/") or is_ext):
                 bad.append(f"R2 {name}: outside the {pkg} package")
             data = z.read(name)
+            memorized |= {a for a in answers if a in data}
             if name.endswith(".py"):
                 bad += check_python_file(name, data.decode("utf-8", "replace"), pkg)
                 continue
@@ -177,6 +239,8 @@ def check_wheel(wheel, pkg, ref_lines):
             hits = sum(1 for line in ref_lines if line in data)
             if hits >= REFERENCE_LINES_LIMIT:
                 bad.append(f"R5 {name}: contains {hits} lines of the original Python implementation")
+    if len(memorized) >= ANSWER_LIMIT:
+        bad.append(f"R6 the wheel holds {len(memorized)} of the test suite's own strings (expected outputs or inputs), e.g. {sorted(memorized, key=len)[0][:60]!r}")
     if not has_ext:
         bad.append("R2 no compiled extension module in the wheel")
     return bad, has_ext
@@ -301,7 +365,7 @@ def main():
             if banned:
                 out["rules"].append(f"R1 forbidden crates in Cargo.lock: {', '.join(banned)}")
             out["rules"] += check_rust(build)
-            problems, _ = check_wheel(wheels[0], pkg, reference_lines(ref_dir))
+            problems, _ = check_wheel(wheels[0], pkg, reference_lines(ref_dir), test_answers(ws + ".tests", ref_dir))
             out["rules"] += problems
             shutil.rmtree(build, ignore_errors=True)
             code, log = sh([py, "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "--no-deps", wheels[0]], env=env)

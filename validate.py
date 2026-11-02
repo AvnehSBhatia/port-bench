@@ -15,6 +15,8 @@ For each task it grades:
                   stop it.
   smuggled-plugin a wheel that ships an extra top-level package registered as a pytest plugin that marks every test
                   passed: rule R2 must reject it, and the plugin must not run.
+  memorized-answers a Rust module that stores the test suite's own strings (expected outputs, inputs) instead of
+                  computing them: rule R6 must reject it.
   forbidden-crate a do-nothing Rust module that depends on a forbidden crate: rule R1 must reject it.
 """
 
@@ -27,6 +29,9 @@ import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import grade as grader  # noqa: E402  (test_answers: the strings rule R6 looks for)
+
 TASKS = json.load(open(os.path.join(HERE, "tasks.json")))
 FORBIDDEN_DEP = {"tomli": 'toml = "*"', "jmespath": 'jmespath = "*"', "tabulate": 'comfy-table = "*"'}
 
@@ -78,6 +83,24 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 """
+
+def answers_lib(answers):
+    """A Rust module that stores the test suite's answers instead of computing them (rule R6 must catch it)."""
+    items = [a.decode() for a in sorted(answers, key=len) if b'"###' not in a and b"\r" not in a and b"\0" not in a][:20]
+    body = ",\n    ".join(f'r###"{s}"###' for s in items)
+    return f"""use pyo3::prelude::*;
+
+static ANSWERS: &[&str] = &[
+    {body}
+];
+
+#[pymodule]
+fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {{
+    m.add("answers", ANSWERS.to_vec())?;
+    Ok(())
+}}
+"""
+
 
 PLUGIN = """import pytest
 
@@ -188,6 +211,11 @@ def validate_task(t, root):
     g = grade(t, ws)
     ok = any(r.startswith("R2") for r in g["rules"]) and g["passed"] < expected and not g["works"]
     row("smuggled-plugin", "rejected by R2, and the plugin does not run (tests fail)", g, ok)
+
+    ws = prepare(t, root, "memorized-answers")
+    rust_package(ws, t, "answers", lib=answers_lib(grader.test_answers(ws + ".tests", os.path.join(ws, "reference"))))
+    g = grade(t, ws)
+    row("memorized-answers", "stores the tests' expected outputs: builds, rejected by R6", g, g.get("build") == "ok" and any(r.startswith("R6") for r in g["rules"]) and not g["works"])
 
     ws = prepare(t, root, "forbidden-crate")
     rust_package(ws, t, "crate", extra=FORBIDDEN_DEP[t["id"]])

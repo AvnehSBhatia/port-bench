@@ -5,6 +5,7 @@
 """
 
 import io
+import json
 import os
 import subprocess
 import sys
@@ -103,6 +104,27 @@ p, has = grade.check_wheel(wheel({"tomli/__init__.py": "from ._native import *\n
 check("a wheel with no compiled module is rejected", not has and "R2" in codes(p))
 p, _ = grade.check_wheel(wheel({**good, "tomli/_native.cpython-313-darwin.so": so + b"Invalid statement\nInvalid initial character for a key part"}), "tomli", ref)
 check("error messages shared with the original are fine", p == [])
+
+print("R6: memorized test answers")
+with tempfile.TemporaryDirectory() as d:
+    tests = os.path.join(d, "ws.tests", "tests")
+    refd = os.path.join(d, "ws", "reference", "tomli")
+    os.makedirs(os.path.join(tests, "data"))
+    os.makedirs(refd)
+    open(os.path.join(refd, "_parser.py"), "w").write('MSG = "Cannot overwrite a value that was already set before"\n')
+    expected = [f"| row {i} | a fairly long expected output line {i:03d} |" for i in range(8)]
+    open(os.path.join(tests, "test_out.py"), "w").write("\n".join(f"def test_{i}():\n    assert f() == {e!r}" for i, e in enumerate(expected)) + "\nMSG = 'Cannot overwrite a value that was already set before'\n")
+    open(os.path.join(tests, "data", "case.json"), "w").write(json.dumps({"given": {"k": "a json value long enough to count as an answer here"}, "short": "x"}))
+    open(os.path.join(tests, "data", "case.toml"), "w").write('title = "a toml input line that is long enough to count"\n')
+    ans = grade.test_answers(os.path.join(d, "ws.tests"), os.path.join(d, "ws", "reference"))
+    check("answers come from test strings, JSON values and data files", all(e.encode() in ans for e in expected) and b"a json value long enough to count as an answer here" in ans and b'title = "a toml input line that is long enough to count"' in ans)
+    check("strings the original implementation holds are not answers", b"Cannot overwrite a value that was already set before" not in ans and b"x" not in ans)
+    p, _ = grade.check_wheel(wheel({**good, "tomli/_native.cpython-313-darwin.so": so + b"\0".join(e.encode() for e in expected[:5])}), "tomli", ref, ans)
+    check("a compiled module holding 5 expected outputs is rejected", "R6" in codes(p))
+    p, _ = grade.check_wheel(wheel({**good, "tomli/_tables.py": "T = " + repr(expected) + "\n"}), "tomli", ref, ans)
+    check("expected outputs stored as Python constants are rejected", "R6" in codes(p))
+    p, _ = grade.check_wheel(wheel({**good, "tomli/_native.cpython-313-darwin.so": so + b"\0".join(e.encode() for e in expected[:4]) + b"Cannot overwrite a value that was already set before"}), "tomli", ref, ans)
+    check("four test strings, and messages from the original, are fine", p == [])
 
 print("Guard: blocked imports and hidden paths")
 with tempfile.TemporaryDirectory() as d:

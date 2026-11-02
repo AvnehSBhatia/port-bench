@@ -4,16 +4,20 @@
 //   OPENROUTER_API_KEY=... node run.mjs --smoke             # 3 min / 5 cents per harness per task: can each drive each model?
 //   OPENROUTER_API_KEY=... node run.mjs --task tomli        # one task, both harnesses
 //   OPENROUTER_API_KEY=... node run.mjs --all               # every task
-//   options: --arms codex,heliod   --allow-any-heliod   --suite <dir> (a folder with its own tasks.json, prepare.py, grade.py)
+//   OPENROUTER_API_KEY=... node run.mjs --all --dry-run     # print the schedule and manifest; start nothing
+//   options: --trials N (default 1; 3 for published numbers)   --no-audit (skip the OpenRouter billing check)   --arms codex,heliod (add codex-solo: Codex without
+//            subagents)   --allow-any-heliod   --suite <dir> (a folder with its own tasks.json, prepare.py, grade.py)
 //
 // Harnesses run one after the other, never at the same time, so their requests never overlap at OpenRouter or the
-// provider. The order alternates by task (codex first on the 1st and 3rd task, heliod first on the 2nd) so neither
-// always goes first. Each harness gets: the same workspace (prepare.py), the same one-line prompt pointing at TASK.md,
+// provider. Which goes first rotates with the task and the trial, so over a run each goes first equally often. Each harness gets: the same workspace (prepare.py), the same one-line prompt pointing at TASK.md,
 // the task's model through OpenRouter pinned to one provider (proxy.mjs), medium reasoning, freedom to run any
 // command, network (cargo and pip need it), and the task's dollar and time caps. proxy.mjs meters what OpenRouter
-// bills. When a harness stops, grade.py builds and tests its port. Results: results/<time>/results.json, SCORECARD.md.
+// bills. When a harness stops, grade.py builds and tests its port. At the end audit.mjs confirms every call with
+// OpenRouter and report.mjs summarises. Results: results/<time>/results.json, SCORECARD.md, AUDIT.md, REPORT.md.
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { arch, platform, release } from "node:os";
 import { join, resolve } from "node:path";
 
 const HERE = import.meta.dirname;
@@ -27,14 +31,38 @@ const EFFORT = "medium";
 const PORT = 8797;
 const PROMPT = "Do the task described in TASK.md in this repository.";
 const ARMS = (args.arms ?? "codex,heliod").split(",");
+const KNOWN_ARMS = ["codex", "codex-solo", "heliod"];
+for (const a of ARMS) if (!KNOWN_ARMS.includes(a)) throw new Error(`unknown arm ${a}; use ${KNOWN_ARMS.join(", ")}`);
+const TRIALS = Math.max(1, Number.parseInt(args.trials ?? "1", 10) || 1);
 if (!process.env.OPENROUTER_API_KEY) throw new Error("OPENROUTER_API_KEY is not set");
 
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 const OUT = join(HERE, "results", stamp);
-mkdirSync(OUT, { recursive: true });
+if (!args["dry-run"]) mkdirSync(OUT, { recursive: true });
 
 const version = (cmd, a) => (spawnSync(cmd, a, { encoding: "utf8" }).stdout ?? "").trim().split("\n").pop();
 const VERSIONS = { codex: version(CODEX, ["--version"]), heliod: version(process.execPath, [HELIOD, "--version"]) };
+VERSIONS["codex-solo"] = VERSIONS.codex;
+
+/** What anyone needs to reproduce or check this run: tool versions, the benchmark's own commit and file hashes. */
+function manifest() {
+	const sha = (f) => createHash("sha256").update(readFileSync(f)).digest("hex").slice(0, 16);
+	const git = (a) => (spawnSync("git", a, { cwd: HERE, encoding: "utf8" }).stdout ?? "").trim();
+	const files = ["tasks.json", "models.json", "grade.py", "prepare.py", "proxy.mjs", "run.mjs"].map((f) => join(SUITE === HERE || f === "models.json" || f === "proxy.mjs" || f === "run.mjs" ? HERE : SUITE, f));
+	return {
+		started: new Date().toISOString(),
+		port_bench_commit: git(["rev-parse", "HEAD"]),
+		port_bench_dirty: git(["status", "--porcelain", "--untracked-files=no"]) !== "",
+		files: Object.fromEntries(files.filter((f) => existsSync(f)).map((f) => [f.slice(HERE.length + 1), sha(f)])),
+		harnesses: { codex: VERSIONS.codex, heliod: VERSIONS.heliod },
+		tools: { node: process.version, python: version("python3", ["--version"]), rustc: version("rustc", ["--version"]), cargo: version("cargo", ["--version"]) },
+		os: `${platform()} ${release()} ${arch()}`,
+		reasoning: EFFORT,
+		trials: TRIALS,
+		arms: ARMS,
+		prompt: PROMPT,
+	};
+}
 
 function startProxy(budget) {
 	const p = spawn(process.execPath, [join(HERE, "proxy.mjs")], { env: { ...process.env, PROXY_PORT: String(PORT), OUT, BUDGET_USD: String(budget) }, stdio: ["ignore", "ignore", "inherit"] });
@@ -63,7 +91,7 @@ async function preflight(model) {
 function arm(name, model, ws, dir, key) {
 	const base = `http://127.0.0.1:${PORT}/r/${key}/api/v1`;
 	const env = { ...process.env, NO_COLOR: "1" };
-	if (name === "codex") {
+	if (name.startsWith("codex")) {
 		const home = join(dir, "codexhome");
 		mkdirSync(home, { recursive: true });
 		return {
@@ -75,7 +103,7 @@ function arm(name, model, ws, dir, key) {
 				"-c", `model_provider="openrouter"`, "-c", `model_providers.openrouter.name="OpenRouter"`,
 				"-c", `model_providers.openrouter.base_url="${base}"`, "-c", `model_providers.openrouter.env_key="OPENROUTER_API_KEY"`,
 				"-c", `model_providers.openrouter.wire_api="responses"`,
-				"-c", `model_reasoning_effort="${EFFORT}"`, "-c", "features.multi_agent=true",
+				"-c", `model_reasoning_effort="${EFFORT}"`, "-c", `features.multi_agent=${name === "codex"}`,
 				"-c", `approval_policy="never"`, "-c", "check_for_update_on_startup=false",
 				"-c", `projects."${ws}".trust_level="trusted"`,
 				PROMPT,
@@ -94,13 +122,14 @@ function arm(name, model, ws, dir, key) {
 	};
 }
 
-function runArm(name, t, budget, maxMs) {
-	const dir = join(OUT, t.id, name);
+function runArm(name, t, budget, maxMs, trial) {
+	const tag = TRIALS > 1 ? `-t${trial}` : "";
+	const dir = join(OUT, t.id, `${name}${tag}`);
 	mkdirSync(dir, { recursive: true });
 	const ws = join(dir, "ws");
 	const prep = spawnSync("python3", [join(SUITE, "prepare.py"), t.id, ws], { encoding: "utf8" });
 	if (prep.status !== 0) throw new Error(`prepare ${t.id}: ${prep.stderr}`);
-	const key = `${name}-${t.id}`;
+	const key = `${name}-${t.id}${tag}`;
 	const a = arm(name, t.model, ws, dir, key);
 	return new Promise((resolve) => {
 		const t0 = Date.now();
@@ -149,45 +178,53 @@ async function runTask(t, { smoke }) {
 			console.log(`${t.id}: preflight failed for ${t.model}, skipping:\n  ${problems.join("\n  ")}`);
 			return rows;
 		}
-		const order = TASKS.indexOf(t) % 2 === 0 ? ARMS : [...ARMS].reverse();
-		console.log(`${t.id}: ${t.model} via ${MODELS[t.model].provider}, $${budget} and ${maxMs / 60000} min per harness, ${order.join(" then ")}`);
-		for (const name of order) {
-			const d = await runArm(name, t, budget, maxMs);
-			const m = (await spend())[d.key] ?? {};
-			let grade = null;
-			if (!smoke) {
-				const g = spawnSync("python3", [join(SUITE, "grade.py"), t.id, d.ws], { encoding: "utf8", maxBuffer: 1 << 26 });
-				try {
-					grade = JSON.parse(g.stdout.trim().split("\n").pop());
-				} catch {
-					grade = { works: false, build: `grader failed: ${(g.stderr || "").slice(-300)}` };
+		console.log(`${t.id}: ${t.model} via ${MODELS[t.model].provider}, $${budget} and ${maxMs / 60000} min per harness, ${TRIALS} trial(s)`);
+		for (let trial = 1; trial <= TRIALS; trial++) {
+			// Rotate who goes first by task and trial, so every arm goes first equally often over a run.
+			const shift = (TASKS.indexOf(t) + trial - 1) % ARMS.length;
+			const order = [...ARMS.slice(shift), ...ARMS.slice(0, shift)];
+			if (TRIALS > 1) console.log(`  trial ${trial}: ${order.join(" then ")}`);
+			for (const name of order) {
+				const d = await runArm(name, t, budget, maxMs, trial);
+				const m = (await spend())[d.key] ?? {};
+				let grade = null;
+				if (!smoke) {
+					const g = spawnSync("python3", [join(SUITE, "grade.py"), t.id, d.ws], { encoding: "utf8", maxBuffer: 1 << 26 });
+					try {
+						grade = JSON.parse(g.stdout.trim().split("\n").pop());
+					} catch {
+						grade = { works: false, build: `grader failed: ${(g.stderr || "").slice(-300)}` };
+					}
+					writeFileSync(join(d.dir, "grade.json"), JSON.stringify(grade, null, 2));
 				}
-				writeFileSync(join(d.dir, "grade.json"), JSON.stringify(grade, null, 2));
+				const cases = grade && (grade.subtests_passed || grade.subtests_failed) ? ` (cases ${grade.subtests_passed}/${grade.subtests_passed + grade.subtests_failed})` : "";
+				const row = {
+					task: t.id,
+					arm: d.name,
+					trial,
+					model: t.model,
+					provider: MODELS[t.model].provider,
+					version: VERSIONS[d.name],
+					works: grade?.works ?? null,
+					tests: grade ? `${grade.passed}/${grade.expected_passed ?? grade.total}${cases}` : null,
+					tests_passed: grade ? grade.passed : null,
+					tests_expected: grade ? (grade.expected_passed ?? grade.total) : null,
+					rules: grade?.rules ?? [],
+					build: grade?.build ?? null,
+					minutes: Number(d.minutes.toFixed(1)),
+					billed_usd: Number((m.usd ?? 0).toFixed(4)),
+					calls: m.calls ?? 0,
+					input_tokens: m.input ?? 0,
+					cached_tokens: m.cached ?? 0,
+					output_tokens: m.output ?? 0,
+					cache_hit: m.input ? Number((m.cached / m.input).toFixed(3)) : 0,
+					refused_calls: m.refused ?? 0,
+					stopped_by: d.why,
+					...(grade?.detail?.blocks ? { blocks: grade.detail.blocks } : {}),
+				};
+				rows.push(row);
+				console.log(`  ${row.arm}: works ${row.works}, tests ${row.tests}, ${row.minutes} min, $${row.billed_usd}, cache ${row.cache_hit}, stopped by ${row.stopped_by}`);
 			}
-			const cases = grade && (grade.subtests_passed || grade.subtests_failed) ? ` (cases ${grade.subtests_passed}/${grade.subtests_passed + grade.subtests_failed})` : "";
-			const row = {
-				task: t.id,
-				arm: d.name,
-				model: t.model,
-				provider: MODELS[t.model].provider,
-				version: VERSIONS[d.name],
-				works: grade?.works ?? null,
-				tests: grade ? `${grade.passed}/${grade.expected_passed ?? grade.total}${cases}` : null,
-				rules: grade?.rules ?? [],
-				build: grade?.build ?? null,
-				minutes: Number(d.minutes.toFixed(1)),
-				billed_usd: Number((m.usd ?? 0).toFixed(4)),
-				calls: m.calls ?? 0,
-				input_tokens: m.input ?? 0,
-				cached_tokens: m.cached ?? 0,
-				output_tokens: m.output ?? 0,
-				cache_hit: m.input ? Number((m.cached / m.input).toFixed(3)) : 0,
-				refused_calls: m.refused ?? 0,
-				stopped_by: d.why,
-				...(grade?.detail?.blocks ? { blocks: grade.detail.blocks } : {}),
-			};
-			rows.push(row);
-			console.log(`  ${row.arm}: works ${row.works}, tests ${row.tests}, ${row.minutes} min, $${row.billed_usd}, cache ${row.cache_hit}, stopped by ${row.stopped_by}`);
 		}
 	} finally {
 		proxy.kill();
@@ -215,19 +252,33 @@ if (args.preflight) {
 	process.exit(0);
 }
 
-await freezeCheck();
 const pick = args.all || args.smoke ? TASKS : TASKS.filter((t) => t.id === args.task);
 if (!pick.length) throw new Error("use --preflight, --smoke, --task <id> or --all");
+if (args["dry-run"]) {
+	// What would run, in order, and the manifest; nothing is started or spent.
+	console.log(JSON.stringify(manifest(), null, 2));
+	for (const t of pick) {
+		for (let trial = 1; trial <= TRIALS; trial++) {
+			const shift = (TASKS.indexOf(t) + trial - 1) % ARMS.length;
+			console.log(`${t.id} trial ${trial}: ${[...ARMS.slice(shift), ...ARMS.slice(0, shift)].join(" then ")} ($${t.budget_usd}, ${t.max_minutes} min each, ${t.model})`);
+		}
+	}
+	const most = pick.reduce((s, t) => s + t.budget_usd * ARMS.length * TRIALS, 0);
+	console.log(`at most $${most.toFixed(2)} if every attempt reaches its cap`);
+	process.exit(0);
+}
+await freezeCheck();
 console.log(`${VERSIONS.codex}; Heliod Harness ${VERSIONS.heliod}. Results in ${OUT}`);
 const rows = [];
+const MANIFEST = manifest();
 for (const t of pick) {
 	rows.push(...(await runTask(t, { smoke: Boolean(args.smoke) })));
-	writeFileSync(join(OUT, "results.json"), JSON.stringify({ effort: EFFORT, smoke: Boolean(args.smoke), versions: VERSIONS, rows }, null, 2));
+	writeFileSync(join(OUT, "results.json"), JSON.stringify({ effort: EFFORT, smoke: Boolean(args.smoke), versions: VERSIONS, manifest: { ...MANIFEST, finished: new Date().toISOString() }, rows }, null, 2));
 }
 const md = [
-	"| Library | Model | Harness | Works | Tests passed | Time (min) | Billed ($) | Input / cached / output tokens | Stopped by |",
-	"| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
-	...rows.map((r) => `| ${r.task} | ${r.model} | ${r.arm} | ${r.works === null ? "-" : r.works ? "yes" : "no"} | ${r.tests ?? "-"} | ${r.minutes} | ${r.billed_usd} | ${(r.input_tokens / 1e6).toFixed(2)}M / ${(r.cached_tokens / 1e6).toFixed(2)}M / ${(r.output_tokens / 1e3).toFixed(0)}k | ${r.stopped_by} |`),
+	"| Library | Model | Harness | Trial | Works | Tests passed | Time (min) | Billed ($) | Input / cached / output tokens | Stopped by |",
+	"| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+	...rows.map((r) => `| ${r.task} | ${r.model} | ${r.arm} | ${r.trial} | ${r.works === null ? "-" : r.works ? "yes" : "no"} | ${r.tests ?? "-"} | ${r.minutes} | ${r.billed_usd} | ${(r.input_tokens / 1e6).toFixed(2)}M / ${(r.cached_tokens / 1e6).toFixed(2)}M / ${(r.output_tokens / 1e3).toFixed(0)}k | ${r.stopped_by} |`),
 ].join("\n");
 const blockRows = rows.filter((r) => r.blocks);
 const blocks = blockRows.length
@@ -240,3 +291,10 @@ const blocks = blockRows.length
 	: "";
 writeFileSync(join(OUT, "SCORECARD.md"), `${md}\n${blocks}\n\n${VERSIONS.codex}; Heliod Harness ${VERSIONS.heliod}; reasoning ${EFFORT}.\n`);
 console.log(`\n${md}\nresults: ${OUT}`);
+// Every metered call checked with OpenRouter (AUDIT.md), then the summary across trials and the ratios (REPORT.md).
+if (!args["no-audit"]) {
+	const au = spawnSync(process.execPath, [join(HERE, "audit.mjs"), OUT], { encoding: "utf8", env: process.env });
+	console.log(au.status === 0 ? `audit: ${join(OUT, "AUDIT.md")}` : `audit failed (run node audit.mjs ${OUT} again): ${au.stderr.slice(-300)}`);
+}
+const rep = spawnSync(process.execPath, [join(HERE, "report.mjs"), OUT], { encoding: "utf8" });
+console.log(rep.status === 0 ? `report: ${join(OUT, "REPORT.md")}` : `report failed: ${rep.stderr.slice(-400)}`);
